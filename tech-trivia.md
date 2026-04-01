@@ -140,3 +140,181 @@ This is surgical limited to specific functions and mainly used for security CVEs
 **📚 Go Deeper:** [Linux Kernel Live Patching Documentation](https://www.kernel.org/doc/html/latest/livepatch/livepatch.html) · [Windows Session Manager Internals](https://learn.microsoft.com/en-us/sysinternals/)
 
 ---
+## Q5: How "View Once" Media Actually Works
+
+**Difficulty:** 🟡 Intermediate &nbsp;|&nbsp; **Tags:** `E2E Encryption` `Client-Side Trust` `Security Model`
+
+> **TL;DR:** The media is end-to-end encrypted, decrypted in memory (never saved to your gallery), the decryption key is destroyed after viewing, and the server deletes the blob. The catch: the entire guarantee is *client-enforced* — a modified app can bypass it.
+
+> 💣 **Analogy:** A self-destructing message from a spy film - except the "destruction" mechanism is built into the envelope itself, not enforced by the spy agency. If someone hands the envelope to a locksmith (a modified app) before opening it, all bets are off.
+
+The technical flow in WhatsApp's View Once:
+
+**1. Sender's side:**
+```
+Media file
+  → Compressed
+  → Encrypted with a random one-time AES-256 key
+  → Uploaded to WhatsApp media servers as an opaque blob
+  → Decryption key + media URL sent as part of E2E-encrypted message payload
+  → view_once: true flag set in message metadata
+```
+
+**2. Recipient's side:**
+```
+Receive encrypted message
+  → Extract media URL + decryption key from payload
+  → Download encrypted blob
+  → Decrypt in RAM (never write to media gallery)
+  → Render on screen for one viewing
+  → Delete local copy + decryption key
+  → Fire "viewed" receipt to server
+  → Server marks blob for deletion
+```
+
+The media is **never written to the device's photo library**. No `MediaStore` write on Android, no `PHPhotoLibrary` save on iOS. It exists briefly in memory, renders, and is gone.
+
+**The uncomfortable truth about this security model:**
+
+The `view_once` flag is a *message metadata attribute*. WhatsApp's official app respects it. A third-party or modified WhatsApp client can simply read the flag, ignore it, and save the media. The encryption doesn't prevent saving - it just prevents *interception in transit*. Once decrypted for display the data exists in memory and a determined actor can grab it.
+
+This is why WhatsApp doesn't claim View Once is DRM-level protection. It's a **social deterrent** backed by a technical default making the *easy path* safe for most users in most situations.
+
+> **⚡ Fun Fact:** Snapchat's original implementation of "disappearing snaps" had a critical flaw: the images were saved to the device's temp folder before display. A user with a file browser app could navigate directly to the folder and retrieve "deleted" snaps. Snapchat patched this — but not before the flaw became widely known. Today's implementations decrypt in memory precisely to close this hole.
+
+> [Sketch: A locked capsule with a countdown. A hand opens it light bursts out briefly the timer hits zero the key dissolves the capsule welds itself shut permanently. In the corner: a shadowy figure with a "modified app" wrench raising an eyebrow at the capsule.]
+
+**📚 Go Deeper:** [WhatsApp Security Whitepaper](https://www.whatsapp.com/security/WhatsApp-Security-Whitepaper.pdf) · [Signal Protocol Documentation](https://signal.org/docs/)
+
+---
+## Q6: I2C vs SPI vs UART - Three Communication Styles at a Hardware Party
+
+**Difficulty:** 🟡 Intermediate &nbsp;|&nbsp; **Tags:** `Embedded Systems` `Hardware Protocols` `Serial Communication`
+
+> **TL;DR:** UART is two friends calling each other directly. I2C is a group chat where one person manages who speaks. SPI is a spotlight blazingly fast, one speaker at a time, more wires.
+
+> 🗣️ **Analogy:** Three different conference communication styles. UART: two colleagues on a private phone call. I2C: a team meeting with one moderator who calls on each person by name. SPI: a stage presentation where the host hands the mic to one person at a time — no confusion, maximum clarity, but you need more infrastructure.
+
+These are **hardware serial communication protocols** - standardized ways for chips on a circuit board to exchange data. They solve the same problem with radically different trade-offs.
+
+---
+
+### UART - The Direct Line
+**Wires:** TX (transmit) + RX (receive) = 2 wires  
+**Topology:** Point-to-point only. One sender, one receiver.  
+**Clock:** None - both devices agree on a **baud rate** beforehand (e.g., 9600, 115200 bps) and trust each other to stay in sync. This is the "asynchronous" part.  
+**Sweet spot:** Debugging, GPS modules, talking to a PC terminal, microcontroller-to-microcontroller chat.
+
+```c
+// Arduino UART example
+Serial.begin(9600);       // Both sides agree: 9600 baud
+Serial.println("Hello");  // TX fires, recipient reads at same rate
+```
+
+**Weakness:** No clock line means drift over long transmissions. Not suitable for high-speed or multi-device scenarios.
+
+---
+
+### I2C - The Managed Group Chat
+**Wires:** SDA (data) + SCL (clock) = 2 wires  
+**Topology:** 1 master, up to 127 slave devices on the *same two wires*, each with a unique 7-bit address.  
+**Clock:** Shared — the master drives SCL, keeping everyone synchronized.  
+**Sweet spot:** Temperature sensors, OLED displays, gyroscopes, EEPROMs - anything low-speed where you want many devices without wire chaos.
+
+```c
+// I2C: Master addresses a specific device before talking
+Wire.beginTransmission(0x3C);  // "Hey, address 0x3C — you listening?"
+Wire.write(0x00);               // Send command byte
+Wire.endTransmission();
+```
+
+**Weakness:** Slower (100kHz standard, 400kHz fast mode). The addressing overhead adds latency. Open-drain bus means you need pull-up resistors - a common beginner stumbling block.
+
+---
+
+### SPI - The High-Speed Spotlight
+**Wires:** MOSI + MISO + SCLK + CS (per device) = 4+ wires  
+**Topology:** 1 master, multiple slaves but each slave needs its own **CS (Chip Select)** line. 3 devices = 6 wires.  
+**Clock:** Dedicated SCLK - fully synchronous, no drift, very fast.  
+**Sweet spot:** SD cards, SPI displays, ADCs, flash memory - anything needing high throughput.
+
+```c
+// SPI: Pull CS low to "activate" one device, transfer data, release CS
+digitalWrite(CS_PIN, LOW);   // Spotlight on
+SPI.transfer(0xFF);           // Blast data at full speed
+digitalWrite(CS_PIN, HIGH);  // Spotlight off
+```
+
+**Weakness:** Wire count explodes with many devices. Full-duplex (simultaneous send/receive) is great but the hardware complexity adds up fast.
+
+---
+
+### The Comparison Table
+
+| Feature | UART | I2C | SPI |
+|---|---|---|---|
+| Wires | 2 | 2 | 4+ |
+| Speed | Up to ~1 Mbps | 100K–3.4 Mbps | 10–100+ Mbps |
+| Devices | 1-to-1 | Up to 127 | 1 master, N slaves (+1 wire each) |
+| Clock | None (async) | Shared master clock | Dedicated clock |
+| Use Case | Debug, GPS, serial | Sensors, OLED, EEPROM | SD cards, displays, flash |
+| Complexity | Simplest | Medium | Most complex |
+
+> **⚡ Fun Fact:** I2C was invented by Philips in 1982 to reduce the number of wires connecting chips on a TV circuit board. The entire protocol was designed to save a few cents of copper per unit at mass scale. Cost optimization masquerading as elegant engineering.
+> [Sketch: Three panels. Panel 1 - Two tin cans on a string (UART). Panel 2 - A moderator at a whiteboard pointing to "Device 0x3C" while 8 students wait silently (I2C). Panel 3 - A theater spotlight on one performer at a time, stage manager holding cables labeled MOSI/MISO/SCLK/CS (SPI).]
+
+**📚 Go Deeper:** [I2C Specification by NXP](https://www.nxp.com/docs/en/user-guide/UM10204.pdf) · [SPI Protocol Deep Dive — SparkFun](https://learn.sparkfun.com/tutorials/serial-peripheral-interface-spi)
+
+---
+## Q7: How Microsoft Word 2024 Opens a 2004 Document Without Breaking
+
+**Difficulty:** 🟡 Intermediate &nbsp;|&nbsp; **Tags:** `Backward Compatibility` `File Formats` `Parsing`
+
+> **TL;DR:** Word never "runs" the old format. It detects the format by magic bytes routes it to a legacy parser translates it into a modern in-memory document object model and renders from that. The old parser ships with every new version quietly doing its job forever.
+
+> 📜 **Analogy:** A master linguist who speaks both Classical Latin and modern English. When handed a Latin manuscript they don't panic - they translate it word-by-word into English, then work in English entirely. The Latin document doesn't need to "run" in a modern environment; it just needs to be understood once.
+
+**Step 1 - Format detection via magic bytes:**
+
+Word doesn't trust file extensions. Instead, it reads the first few bytes of the file called a **magic number** or **file signature**:
+
+```
+Old .doc (OLE2 Compound Document): D0 CF 11 E0 A1 B1 1A E1
+Modern .docx (ZIP archive):        50 4B 03 04  (that's "PK" — it's a ZIP)
+```
+
+Based on these bytes, Word routes the file to the correct parser.
+
+**Step 2 - Legacy parser for binary .doc:**
+
+The old `.doc` format is the **Microsoft Binary File Format (BIFF)** - a deeply complex binary spec that Microsoft eventually published. Word 2024 still ships with a complete BIFF parser. It's not glamorous, it's not modern but it's never deleted. It translates the binary structure into Word's internal **Document Object Model (DOM)**: a tree of paragraphs, runs, styles, and properties.
+
+**Step 3 - Modern .docx via open XML:**
+
+A `.docx` file is literally a **ZIP archive**. Unzip one right now and you'll find:
+
+```
+word/
+  document.xml      ← Your actual text, in XML
+  styles.xml        ← Style definitions
+  settings.xml      ← Document settings
+[Content_Types].xml ← Schema version declaration
+```
+
+The `[Content_Types].xml` declares which ECMA-376 schema version this document uses. Word reads the version tag and applies any necessary **compatibility transforms** - mapping old XML attributes to new ones, resolving deprecated styles, filling in defaults for missing properties.
+
+**Step 4 - Render from the DOM not the file:**
+
+Once the document is in the internal DOM, Word renders from *that* - not from the original file. A 2004 document and a 2024 document are identical at the rendering layer. The parser is a one-way translator; the renderer never knows what era the document came from.
+
+> **⚡ Fun Fact:** The ECMA-376 specification for .docx format is **over 6,000 pages long.** For context that's longer than the entire Lord of the Rings trilogy including appendices. Implementing full compatibility with every edge case in that spec is why every non-Microsoft office suite (LibreOffice, Google Docs) has persistent formatting quirks when opening complex Word files.
+
+> [Sketch: A time portal labeled "2004 .doc enters here." A detective examines the magic bytes with a magnifying glass and routes it to a cobwebbed "BIFF Parser" module in the corner. The parser produces a clean modern DOM tree. Word's renderer works from the tree, blissfully unaware of the document's age.]
+
+**📚 Go Deeper:** [ECMA-376 Office Open XML Standard](https://ecma-international.org/publications-and-standards/standards/ecma-376/) · [Microsoft Binary File Format Specification](https://docs.microsoft.com/en-us/openspecs/office_file_formats/ms-doc/)
+
+---
+
+## Q8: Bluetooth Pairing "Sorcery" - 30 Seconds vs 3 Seconds
+
+**Difficulty:** 🟠 Intermediate-Advanced &nbsp;|&nbsp; **Tags:** `Cryptography` `ECDH` `Wireless Protocols`
