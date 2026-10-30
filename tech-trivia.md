@@ -633,3 +633,229 @@ But it's gameable (link farms, link exchanges), it's slow to update (the graph r
 
 *Written for engineers who explain, not just engineers who know.*  
 *Difficulty ratings: 🟢 Anyone can follow · 🟡 Helpful to have dev background · 🟠 Assumes engineering familiarity*
+
+## Q12: How YouTube Resumes a 20GB Upload After WiFi Disconnects
+
+**Difficulty:** 🟡 Intermediate &nbsp;|&nbsp; **Tags:** `Distributed Systems` `HTTP` `Resumable Uploads` `Networking`
+
+> **TL;DR:** YouTube uses a resumable upload protocol. Your device and YouTube's server maintain an upload session with a unique session identifier. The server tracks how much data it has successfully received and stored. When your WiFi reconnects, your device queries the server for the last confirmed upload position and continues from there instead of starting over.
+
+> 📦 **Analogy:** Imagine delivering a 20GB package to a warehouse in 20 smaller boxes, each containing 1GB. The warehouse records every box it successfully receives. If your delivery truck breaks down after delivering 14 boxes, you don't have to bring all 20 boxes again. You just ask the warehouse, "How many boxes have you received?" and continue delivering from box 15.
+
+### The Technical Breakdown
+
+Uploading a large file over an unreliable network presents a fundamental problem:
+
+**How can the client and server agree on how much data has actually been uploaded when the connection suddenly disappears?**
+
+The solution is a technique called **Resumable Uploads**.
+
+### Step 1 - Initiating an Upload Session
+
+When you select a 20GB video to upload, YouTube's client doesn't simply send the entire file in one enormous HTTP request.
+
+Instead, it initiates an upload session with the server.
+
+The server creates a unique session identifier and returns a session URL or token to the client.
+
+This identifier allows the client to refer to the same upload session in subsequent requests.
+
+```text
+Client → YouTube Server
+
+"Hey, I want to upload this 20GB video."
+
+Server → Client
+
+"Upload session created.
+Here's your unique session identifier."
+```
+
+The session is now established.
+
+### Step 2 — Uploading the Video
+
+The client begins transmitting the video data.
+
+For simplicity, imagine the file is uploaded in chunks:
+
+```text
+20GB Video
+    │
+    ├── Chunk 1: 0–1GB
+    ├── Chunk 2: 1–2GB
+    ├── Chunk 3: 2–3GB
+    │
+    ├── ...
+    │
+    └── Chunk 20: 19–20GB
+```
+
+As data arrives, the server processes the upload and maintains the confirmed upload position.
+
+For example:
+
+```text
+Upload Progress: 14GB / 20GB
+
+Server's confirmed position: 14GB
+Client's transmitted position: 14GB
+```
+
+The crucial distinction is that the server tracks what it has actually received, not merely what the client has attempted to send.
+
+### Step 3 - WiFi Suddenly Disconnects
+
+At 14GB, your WiFi connection disappears.
+
+The upload request fails because the client can no longer communicate with the server.
+
+```text
+Client                         Server
+  │                               │
+  │──── Upload 0–14GB ──────────→ │
+  │                               │
+  │       WiFi disconnects        │
+  │                               │
+  X                               │
+```
+
+Your browser or YouTube app knows that the connection failed.
+
+But it does not automatically assume that the last bytes it transmitted were successfully stored by the server.
+
+Why?
+
+Because network delivery is not the same thing as confirmed server-side storage.
+
+Some data might have been transmitted but not received, or received but not fully processed before the connection failed.
+
+### Step 4 - WiFi Reconnects: The Critical Question
+
+Two minutes later, your WiFi comes back.
+
+The client still has:
+
+- The original video file.
+- The upload session identifier.
+- The previous upload progress information.
+
+Instead of restarting the upload, the client sends a request to the server:
+
+```text
+Client → Server
+
+"Hey, my upload connection failed.
+I want to resume the same upload session.
+
+How much of my video have you successfully received?"
+```
+
+The server checks the upload session's recorded state.
+
+```text
+Server → Client
+
+"Your upload session is still active.
+
+The last confirmed byte position is 14GB.
+
+Continue uploading from there."
+```
+
+The client can now resume sending data from the confirmed position.
+
+### Step 5 - Upload Resumes
+
+The client seeks to the corresponding byte offset in the original video file and continues transmitting the remaining data.
+
+```text
+Before disconnection:
+
+[██████████████░░░░░░] 14GB / 20GB
+
+After reconnection:
+
+[██████████████░░░░░░] Resume at 14GB
+
+Remaining upload:
+
+14GB → 20GB
+```
+
+The first 14GB does not need to be uploaded again.
+
+Once all the data has been received and the upload is finalized, YouTube can proceed with video processing.
+
+---
+
+### The Actual Mechanism: HTTP Resumable Uploads
+
+This behavior is commonly implemented using a **resumable upload protocol**.
+
+One example is the HTTP-based resumable upload mechanism used by Google's APIs.
+
+The client sends requests associated with a particular upload session, and the server responds with the last confirmed byte position.
+
+For example, a protocol may use a status query that returns a response similar to:
+
+```http
+HTTP/1.1 308 Resume Incomplete
+Range: bytes=0-14680063999
+```
+
+This indicates that the server has confirmed receiving bytes through the specified position.
+
+The client calculates the next byte to send and resumes from that position.
+
+**Important:** This is an illustrative example of a resumable upload protocol. YouTube's internal implementation details may differ.
+
+### Why Doesn't YouTube Just Remember the Upload Progress in Your Browser?
+
+Because the browser's local progress bar is not authoritative.
+
+Imagine your browser says:
+
+```text
+Uploaded: 14GB
+```
+
+But the network disconnects while the last few packets are still in transit.
+
+The server might have received only 13.98GB.
+
+If the client blindly resumes from 14GB, it could skip data that the server never received.
+
+Therefore, the client must reconcile its local progress with the server's confirmed upload position.
+
+The server is the source of truth for the data it has received.
+
+### What Happens If the Upload Session Expires?
+
+Resumable upload sessions are not necessarily permanent.
+
+If the session expires, the client may no longer be able to resume the same upload.
+
+Depending on the platform's behavior, it might need to initiate a new upload session.
+
+This is why resumable upload protocols often have session expiration rules.
+
+### The Engineering Principle
+
+This is a classic example of **making a long-running operation recoverable from partial failure**.
+
+The system does not assume that a network connection will remain alive for the entire duration of a 20GB upload.
+
+Instead, it separates:
+
+- The upload session from the network connection.
+- The confirmed upload position from the client's local progress.
+- The video file from the individual HTTP requests used to transmit it.
+
+The upload can survive a temporary network failure because the session state persists beyond the lifetime of a single connection.
+
+> **⚡ Fun Fact:** Resumable uploads are useful far beyond YouTube. They are used in cloud storage, large file transfers, backup systems, and mobile applications where connections are unreliable. The same general principle applies to downloading large files: track confirmed progress and continue from the last valid position.
+
+> [Sketch: A 20GB video file being uploaded to a server. At 14GB, a WiFi symbol breaks. Two minutes later, the WiFi reconnects. The client asks the server "What's my last confirmed byte?" The server replies "14GB." The upload resumes from 14GB instead of 0GB.]
+
+**📚 Go Deeper:** [Google Cloud Resumable Uploads](https://cloud.google.com/storage/docs/resumable-uploads) · [HTTP 308 Resume Incomplete](https://developers.google.com/youtube/v3/guides/using_resumable_upload_protocol)
